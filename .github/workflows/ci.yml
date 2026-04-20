@@ -1,0 +1,127 @@
+# ============================================================
+# AzMigrateDemo - GitHub Actions CI/CD
+# SQL 스크립트 문법 검사 + 빌드 검증
+# ============================================================
+
+name: CI - AzMigrateDemo Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # ── SQL 스크립트 검증 ────────────────────────────────────────
+  validate-sql:
+    name: SQL Script Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SQL 파일 존재 확인
+        run: |
+          echo "=== SQL 파일 목록 ==="
+          find sql/ -name "*.sql" -type f
+          
+          # 필수 파일 확인
+          test -f sql/01_schema.sql   && echo "✅ 01_schema.sql 존재"
+          test -f sql/02_sampledata.sql && echo "✅ 02_sampledata.sql 존재"
+
+      - name: SQL 파일 인코딩 확인 (UTF-8)
+        run: |
+          for f in sql/*.sql; do
+            encoding=$(file -bi "$f" | grep -o 'charset=[a-z0-9-]*' | cut -d= -f2)
+            echo "$f → $encoding"
+          done
+
+      - name: 민감 정보 패턴 검사
+        run: |
+          echo "=== 민감 정보 검사 ==="
+          # 실제 비밀번호/키 패턴이 SQL에 포함됐는지 확인
+          if grep -rni "password\s*=\s*['\"][^'\"]\+" sql/; then
+            echo "❌ SQL 파일에 하드코딩된 비밀번호 발견!"
+            exit 1
+          else
+            echo "✅ 민감 정보 없음"
+          fi
+
+  # ── .NET 웹앱 빌드 검증 ──────────────────────────────────────
+  validate-dotnet:
+    name: .NET Web App Validation
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Web.config 검증
+        run: |
+          Write-Host "=== Web.config XML 유효성 검사 ==="
+          [xml]$config = Get-Content "iis-webapp\Web.config"
+          Write-Host "✅ Web.config XML 형식 정상"
+
+          # Connection String 확인 (localhost 또는 환경변수 참조)
+          $connStr = $config.configuration.connectionStrings.add.connectionString
+          Write-Host "Connection String: $connStr"
+        shell: pwsh
+
+      - name: PowerShell 스크립트 문법 검사
+        run: |
+          $scripts = Get-ChildItem -Path scripts -Filter "*.ps1" -Recurse
+          foreach ($script in $scripts) {
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              $script.FullName, [ref]$null, [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              Write-Host "❌ $($script.Name): 문법 오류 $($errors.Count)개"
+              $errors | ForEach-Object { Write-Host "   $_" }
+              exit 1
+            } else {
+              Write-Host "✅ $($script.Name): 문법 정상"
+            }
+          }
+        shell: pwsh
+
+  # ── Java 코드 컴파일 검증 ────────────────────────────────────
+  validate-java:
+    name: Java Servlet Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'microsoft'
+
+      - name: Java 파일 목록 확인
+        run: |
+          echo "=== Java 파일 목록 ==="
+          find tomcat-api/ -name "*.java" -type f
+
+      - name: 민감 정보 패턴 검사 (Java)
+        run: |
+          echo "=== Java 파일 민감 정보 검사 ==="
+          if grep -rn "password\s*=\s*\"[^\"]\+" tomcat-api/; then
+            echo "❌ Java 파일에 하드코딩된 비밀번호 발견!"
+            exit 1
+          else
+            echo "✅ 민감 정보 없음"
+          fi
+
+  # ── 전체 검증 완료 리포트 ────────────────────────────────────
+  summary:
+    name: Validation Summary
+    needs: [validate-sql, validate-dotnet, validate-java]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: 결과 요약
+        run: |
+          echo "=================================="
+          echo "  AzMigrateDemo CI 검증 완료"
+          echo "=================================="
+          echo "SQL 검증:    ${{ needs.validate-sql.result }}"
+          echo ".NET 검증:   ${{ needs.validate-dotnet.result }}"
+          echo "Java 검증:   ${{ needs.validate-java.result }}"
